@@ -1,0 +1,685 @@
+---
+title: "Distribution Transformation Explantion"
+author: "Matthew Kay"
+output: 
+  html_document:
+    self_contained: true
+---
+
+```{r knitr_setup, include=FALSE}
+knitr::opts_chunk$set(
+  fig.retina = 2,
+  dev = "png",
+  dev.args = list(png = list(type = "cairo"))
+)
+```
+
+## Setup
+
+The following libraries are needed to run this document:
+
+```{r setup, message=FALSE}
+library(ggplot2)
+library(dplyr)
+library(patchwork)
+library(ggblend)   # remotes::install_github("mjskay/ggblend")
+library(ggforce)
+library(sn)
+library(distributional)
+library(ggdist)
+library(purrr)
+library(tidyr)
+
+theme_set(ggdist::theme_ggdist())
+```
+
+## The linear-in-probit model of perceived probabilities
+
+We want to set up a linear-in-probit function that maps from
+true probabilities to perceived probabilities in probit space. It has two parameters:
+
+- `alpha` ($\alpha$): the intercept: the perceived probability at 50%, in probit space
+- `beta` ($\beta$): the slope of the linear relationship between true and perceived
+probabilities, in probit space.
+
+The linear-in-probit function for a perceived probability, $p_\mathrm{perc}$, 
+given a displayed probability, $p$, is:
+
+$$
+p_\mathrm{perc} 
+= \mathrm{lpr}(p)
+= \mathrm{probit}^{-1}\left( \alpha + \beta \cdot \mathrm{probit}(p) \right)
+$$
+
+To write this in R, we need the `probit` and `inv_probit` functions, which are
+the inverse CDF and CDF of the normal distribution, respectively:
+
+```{r}
+probit = qnorm
+inv_probit = pnorm
+```
+
+Then we can write the `lpr` function and its inverse as:
+
+```{r}
+lpr = function(p, alpha, beta) inv_probit(alpha + beta * probit(p))
+inv_lpr = function(p, alpha, beta) inv_probit((probit(p) - alpha) / beta)
+```
+
+This function looks like this:
+
+```{r fig.width = 7, fig.height = 7}
+lpr_grid = expand.grid(
+  p = seq(0, 1, length.out = 200),
+  alpha = c(-.4, 0, .4),
+  beta = exp(seq(-.4, .4, length.out = 8))
+) |>
+  mutate(p_perc = lpr(p, alpha, beta))
+
+plot_lpr_grid = lpr_grid |>
+  ggplot(aes(x = p, y = p_perc, group = interaction(alpha, beta), color = beta)) +
+  geom_vline(xintercept = 0.5, color = "gray85") +
+  geom_hline(yintercept = 0.5, color = "gray85") +
+  geom_abline(intercept = 0, slope = 1, color = "gray85") +
+  labs(subtitle = "lpr in probability space", y = "subjective probability", x = "true probability")
+
+plot_lpr_grid_probit = lpr_grid |>
+  filter(0 < p & p < 1) |>
+  ggplot(aes(x = probit(p), y = probit(p_perc), group = interaction(alpha, beta), color = beta)) +
+  geom_vline(xintercept = 0, color = "gray85") +
+  geom_hline(yintercept = 0, color = "gray85") +
+  geom_abline(intercept = 0, slope = 1, color = "gray85") +
+  labs(subtitle = "lpr in probit space", y = "probit(subjective probability)", x = "probit(true probability)")
+
+(plot_lpr_grid + plot_lpr_grid_probit) &
+  geom_line(show.legend = FALSE) &
+  facet_grid(rows = vars(alpha), labeller = "label_both") &
+  cowplot::panel_border()
+```
+
+```{r}
+ggsave("figures/linear-in-probit.pdf", width = 5, height = 5)
+```
+
+
+## Transforming distributions through the linear-in-probit model
+
+Given a distribution we want to display:
+
+$$
+X \sim \mathrm{Normal}(\mu, \sigma)
+$$
+
+We can use the perceptual transformation using the linear-in-probit function
+from [Kay 2019](https://osf.io/6xcnw/) to determine a distribution we should
+display that will be perceived as if it were $X$, from the perspective of
+judging the probability that distribution exceeds a given threshold; call this $X^>$:
+
+$$
+\begin{align*}
+\mathbb{P}(X^> > x) &= \mathrm{lpr}^{-1}\left( \mathbb{P}(X > x) \right)\\
+\implies X^> &\sim \mathrm{Normal}(\mu^>, \sigma^>)\\
+\textrm{where } \mu^> &= \mu - \alpha\sigma\\
+\textrm{and } \sigma^> &= \beta\sigma
+\end{align*}
+$$
+
+First, let's define the `alpha` and `beta` parameters of the linear-in-probit
+probability perception function we'll use for the rest of this document:
+
+```{r}
+alpha = -.3
+beta = 2.0
+```
+
+If we have a distribution we want to display, say $X \sim Normal(\mu, \sigma)$:
+
+```{r}
+mu = .52
+sigma = .025
+
+X_perceived = dist_normal(mu, sigma)
+X_perceived
+```
+
+We can define a function for $X^>_{\alpha,\beta}$, also parameterized by $\mu$ and $\sigma$:
+
+```{r}
+dist_gt_normal = function(mu, sigma) {
+  mu_gt = mu - alpha * sigma
+  sigma_gt = beta * sigma
+  dist_normal(mu_gt, sigma_gt)  
+}
+
+X_gt = dist_gt_normal(mu, sigma)
+X_gt
+```
+
+### Visualizing the transformation
+
+To visualize the transformation, we will build up a set of subplots that
+we can arrange into a larger plot show the relationship between the percevied
+distribution, the linear-in-probit function, and the displayed distribution.
+
+**NOTE:** these pieces may not make sense in isolation; you may want to skip
+to **Putting it all together**, below.
+
+#### Densities
+
+We'll start by visualizing both distributions together as densities:
+
+```{r}
+x_min = 0.3
+x_max = 0.7
+
+arrow_ = \(...) arrow(..., angle = 45, type = "closed", length = unit(5, "pt"))
+
+geom_segment_ = \(..., alpha = 0.5, linetype = "11") geom_segment(..., alpha = alpha, linetype = linetype)
+
+# scale_color_dist = \(...) scale_color_brewer(..., 
+#   limits = c("perceived", "displayed"), palette = "Set2",
+#   guide = "none",
+#   aesthetics = c("color", "fill")
+# )
+
+scale_color_dist = \(...) scale_color_manual(..., 
+  values = c("perceived" = "#d95f02", "displayed" = "#1b9e77"),
+  guide = "none",
+  aesthetics = c("color", "fill")
+)
+
+quantile_lines_df = function(X_perceived, X_displayed) {
+  tibble(
+    x_perc = seq(
+      0.45,
+      0.6,
+      by = 0.025
+    ),
+    p_perc = 1 - cdf(X_perceived, x_perc)[[1]],
+    d_perc = density(X_perceived, x_perc)[[1]],
+    p_disp = inv_lpr(p_perc, alpha, beta),
+    x_disp = quantile(X_displayed, 1 - p_disp)[[1]],
+    d_disp = density(X_displayed, x_disp)[[1]]
+  )
+}
+
+density_plot = function(X_perceived, X_displayed) {
+  quantile_lines_df = quantile_lines_df(X_perceived, X_displayed)
+  
+  data.frame(
+    X = c(X_perceived, X_displayed),
+    dist = c("perceived", "displayed")
+  ) |>
+    ggplot() +
+    stat_slab(
+      aes(xdist = X, color = dist, fill = dist, side = ifelse(dist == "perceived", "top", "bottom")), 
+      alpha = 0.5, size = 0.75
+    ) +
+    geom_segment_(
+      aes(x = x_perc, xend = x_perc, y = 0, yend = 1, color = "perceived"),
+      data = quantile_lines_df
+    ) +
+    geom_segment_(
+      aes(x = x_disp, xend = x_disp, y = 0, yend = -1, color = "displayed"),
+      data = quantile_lines_df
+    ) +
+    geom_segment_(
+      aes(x = x_perc, xend = x_perc, y = 0, yend = 1, color = "perceived"),
+      data = filter(quantile_lines_df, x_perc == 0.5), linetype = "solid", alpha = 1
+    ) +
+    geom_segment_(
+      aes(x = x_disp, xend = x_disp, y = 0, yend = -1, color = "displayed"),
+      data = filter(quantile_lines_df, x_perc == 0.5), linetype = "solid", alpha = 1
+    ) +
+    coord_cartesian(expand = FALSE, clip = "off", xlim = c(x_min, x_max)) +
+    scale_color_dist() +
+    scale_x_continuous(limits = c(x_min, x_max), breaks = NULL) +
+    scale_y_continuous(breaks = NULL) +
+    labs(x = NULL, y = NULL) +
+    theme(
+      axis.line.x = element_blank(),
+      axis.line.y = element_blank(),
+      plot.background = element_blank(),
+      panel.background = element_blank()
+    )    
+}
+
+density_plot(X_perceived, X_gt)
+```
+
+#### CCDF of perceived distribution
+
+If we look at the CCDF of the desired-to-be-perceived distribution:
+
+```{r}
+perceived_ccdf_plot = function(X_perceived, X_displayed) {
+  quantile_lines_df = quantile_lines_df(X_perceived, X_displayed)
+  
+  data.frame(
+    X = X_perceived
+  ) |>
+    ggplot(aes(color = "perceived")) +
+    stat_slab(aes(xdist = X), slab_type = "ccdf", normalize = "none", fill = NA, size = 1, scale = 1) +
+    geom_segment_(
+      aes(x = x_perc, xend = x_perc, y = 0, yend = p_perc, color = "perceived"),
+      data = quantile_lines_df
+    ) * copy_over(
+      aes(xend = x_max, y = p_perc),
+    ) +
+    geom_segment_(
+      aes(x = x_perc, xend = x_perc, y = 0, yend = p_perc, color = "perceived"),
+      data = filter(quantile_lines_df, x_perc == 0.5), alpha = 1, linetype = "solid"
+    ) * copy_over(
+      aes(xend = x_max, y = p_perc),
+      arrow = arrow_()
+    ) +
+    scale_y_continuous(limits = c(0,1)) +
+    scale_x_continuous(limits = c(x_min, x_max), breaks = NULL) +
+    scale_color_dist() +
+    coord_cartesian(expand = FALSE, clip = "off", xlim = c(x_min, x_max)) +
+    labs(
+      x = NULL,
+      y = "Perceived P(X > x)"
+    ) +
+    theme(
+      plot.background = element_blank(),
+      panel.background = element_blank(),
+      axis.line.x = element_blank()
+    )
+}
+
+perceived_ccdf_plot(X_perceived, X_gt)
+```
+
+#### Linear-in-probit function
+
+We can translate perceived probabilities into corresponding probabilities we should display:
+
+```{r}
+lpr_plot = function(X_perceived, X_displayed) {
+  quantile_lines_df = quantile_lines_df(X_perceived, X_displayed)
+  
+  lpr_df = tibble(
+    p_disp = seq(0, 1, length.out = 500),
+    p_perc = lpr(p_disp, alpha, beta)
+  ) 
+  
+  lpr_df |>
+    ggplot(aes(p_disp, p_perc)) +
+    geom_line(size = 0.75) +
+    geom_segment_(
+      aes(x = 0, xend = p_disp, y = p_perc, yend = p_perc, color = "perceived"),
+      data = quantile_lines_df
+    ) * copy_over(
+      aes(x = p_disp, y = 0, color = "displayed")
+    ) +
+    geom_segment_(
+      aes(x = 0, xend = p_disp, y = p_perc, yend = p_perc, color = "perceived"),
+      data = filter(quantile_lines_df, x_perc == 0.5), alpha = 1, linetype = "solid"
+    ) * copy_over(
+      aes(x = p_disp, y = 0, color = "displayed")
+    ) +
+    geom_abline(intercept = 0, slope = 1, alpha = 0.25, size = 0.75, linetype = "22") +
+    scale_x_continuous(limits = c(0, 1), position = "top") +
+    scale_y_continuous(limits = c(0, 1), position = "right") +
+    scale_color_dist() +
+    coord_cartesian(expand = FALSE, clip = "off") +
+    labs(
+      x = "Displayed P(X > x)",
+      y = "Perceived P(X > x)"
+    ) +
+    theme(
+      plot.background = element_blank(),
+      panel.background = element_rect(fill = "gray95", color = alpha("black", 0.25)),
+    )
+}
+
+lpr_plot(X_perceived, X_gt)
+```
+
+#### Connecting plots
+
+We will also need two plots that are just connectors to draw lines and arcs from the
+linear-in-probit plot to the CCDF of the displayed distribution.
+
+First, a plot of lines:
+
+```{r}
+lines_plot = function(X_perceived, X_displayed) {
+  quantile_lines_df = quantile_lines_df(X_perceived, X_displayed)
+
+  quantile_lines_df |>
+    ggplot(aes(x = p_disp, xend = p_disp, y = 0, yend = 1, color = "displayed")) +
+    geom_segment_() +
+    geom_segment_(data = \(d) d |> filter(x_perc == 0.5), linetype = "solid", alpha = 1) +
+    scale_color_dist() +
+    coord_cartesian(expand = FALSE, clip = "off") +
+    labs(x = NULL, y = NULL) +
+    scale_x_continuous(limits = c(0, 1), breaks = NULL) +
+    scale_y_continuous(limits = c(0, 1), breaks = NULL) +
+    theme(
+      axis.line.x = element_blank(),
+      axis.line.y = element_blank(),
+      plot.background = element_blank(),
+      panel.background = element_blank()
+    )
+}
+
+lines_plot(X_perceived, X_gt)
+```
+
+And a plot of curves:
+
+```{r}
+curves_plot = function(X_perceived, X_displayed) {
+  quantile_lines_df = quantile_lines_df(X_perceived, X_displayed)
+
+  quantile_lines_df |>
+    ggplot(aes(x0 = 0, y0 = 0, r = p_disp, start = pi/2, end = pi, color = "displayed")) +
+    geom_arc(alpha = 0.5, linetype = "11") +
+    geom_arc(data = \(d) d |> filter(x_perc == 0.5), arrow = arrow_()) +
+    scale_x_continuous(limits = c(0,1), breaks = NULL) +
+    scale_y_reverse(limits = c(1,0), breaks = NULL) +
+    coord_cartesian(expand = FALSE, clip = "off") +
+    scale_color_dist() +
+    labs(x = NULL, y = NULL) +
+    theme(
+      axis.line.x = element_blank(),
+      axis.line.y = element_blank(),
+      plot.background = element_blank(),
+      panel.background = element_blank()
+    )
+}
+
+curves_plot(X_perceived, X_gt)
+```
+
+#### CCDF of displayed distribution
+
+Finally, we need the CCDF of the displayed distribution, flipped to line up
+with the flipped density in the density plot:
+
+```{r}
+displayed_ccdf_plot = function(X_perceived, X_displayed) {
+  quantile_lines_df = quantile_lines_df(X_perceived, X_displayed)
+
+  data.frame(
+    X = X_displayed
+  ) |>
+    ggplot(aes(color = "displayed")) +
+    stat_slab(aes(xdist = X), slab_type = "ccdf", normalize = "none", fill = NA, size = 1, scale = 1, side = "bottom") +
+    geom_segment_(
+      aes(x = x_disp, xend = x_disp, y = 0, yend = p_disp, color = "displayed"),
+      data = quantile_lines_df
+    ) * copy_over(
+      aes(xend = x_max, y = p_disp)
+    ) +
+    geom_segment_(
+      aes(x = x_disp, xend = x_disp, y = 0, yend = p_disp, color = "displayed"),
+      data = filter(quantile_lines_df, x_perc == 0.5), linetype = "solid", alpha = 1
+    ) * copy_over(
+      aes(xend = x_max, y = p_disp)
+    ) +
+    scale_color_dist() +
+    coord_cartesian(expand = FALSE, clip = "off", xlim = c(x_min, x_max)) +
+    labs(
+      x = "x",
+      y = "Displayed P(X > x)"
+    ) +
+    scale_y_reverse(limits = c(1,0)) +
+    scale_x_continuous(limits = c(x_min, x_max)) +
+    theme(
+      plot.background = element_blank(),
+      panel.background = element_blank()
+    )
+}
+
+displayed_ccdf_plot(X_perceived, X_gt)
+```
+
+#### Putting it all together
+
+Putting the pieces together above we have:
+
+```{r fig.width = 6, fig.height = 6}
+transformation_plot = function(X_perceived, X_displayed) {
+  (
+    (perceived_ccdf_plot(X_perceived, X_displayed) + lpr_plot(X_perceived, X_displayed)) /
+    (density_plot(X_perceived, X_displayed) + lines_plot(X_perceived, X_displayed)) /
+    (displayed_ccdf_plot(X_perceived, X_displayed) + curves_plot(X_perceived, X_displayed))
+  ) & 
+    theme(plot.margin = margin())
+}
+
+transformation_plot(X_perceived, X_gt)
+```
+
+```{r}
+ggsave("figures/correction-loop-normal.pdf", width = 6, height = 6)
+```
+
+
+If you trace a single line clockwise around this chart, it shows:
+1. We can take an x position in the green distribution (the probabilities we want to be perceived,
+2. Take the probability that X > x,
+3. Transform it according to the inverse linear-in-probit to obtain the probability we should show,
+4. and then look up the x value corresponding to that probability in $X^>$ (the orange distribution),
+and find that it is the same x value we started with. This holds for all $x$ values. Thus, $X^>$ 
+is a distribution that satisfies the property that *all* of the right-tailed probabilities it shows should
+be perceived as the right-tailed probabilities from $X$ (the green distribution).
+
+## Skew-normal
+
+As shown above, $X^>$ ensures that *every* right-tailed probability that is 
+displayed is perceived as the corresponding right-tailed probability on the underlying
+distribution. However, in order to do so, it must also move the mode of the distribution,
+which may be a bit weird --- especially if the mode is intended to match the most likely
+vote count predicted by the model.
+
+We could try to find a different distribution, say $X^*$, where:
+
+1. The mode of the displayed distribution matches the mode of the
+underlying distribution
+
+2. $P(X^* > 0.5)$ equals $\mathrm{lpr}^{-1}(P(X > 0.5))$, since after all this is the win probability --- 
+the probability we care most about.
+
+3. For the remaining $x$ values, $P(X^* > x)$ *roughly* equals $P(X > x)$.
+
+We'll do this by finding a skew-normal with mode equal to $mu$, standard deviation 
+equal to $sigma^>$, and $P(X^* > 0.5)$ = $P(X > 0.5)$.
+
+To do this, we first define a skew-normal in terms of its sd (`sigma`) instead of
+the usual `omega` scale parameter (the usual parameterization is in terms of location, `xi`, 
+scale, `omega`, and skew, `alpha`). This alternative parameterization
+will allow us to generate a distribution with a specific standard deviation:
+
+```{r}
+omega_ = function(sigma, alpha) {
+  delta = alpha / sqrt(1 + alpha^2)
+  sigma / sqrt(1 - 2 * delta^2 / pi)
+}
+
+dsn_sigma = function(x, xi, sigma, alpha) {
+  dsn(x, xi, omega_(sigma, alpha), alpha)  
+}
+
+qsn_sigma = function(p, xi, sigma, alpha) {
+  qsn(p, xi, omega_(sigma, alpha), alpha)  
+}
+
+psn_sigma = function(x, xi, sigma, alpha) {
+  psn(x, xi, omega_(sigma, alpha), alpha)  
+}
+
+rsn_sigma = function(n, xi, sigma, alpha) {
+  rsn(n, xi, omega_(sigma, alpha), alpha)  
+}
+
+```
+
+Next, we need a function to get the mode of a skew Normal distribution. The mode
+of a skew-Normal does not have a closed form, so we
+will use numerical optimization to find the maximum of the density function:
+
+```{r}
+sn_mode = function(xi = 0, sigma = 1, alpha = 0) {
+  optim(
+    qsn_sigma(0.5, xi, sigma, alpha), # start at median
+    dsn_sigma, 
+    xi = xi, sigma = sigma, alpha = alpha, 
+    control = list(fnscale = -1),     # maximize
+    method = "BFGS"
+  )$par
+}
+```
+
+Now we can find a skew-normal distribution with approximately a mode equal to
+the original mean (`mu`), standard deviation equal to the lpr-transformed distribution
+(`sigma_gt`), and a `P(X > 0.5)` equal to the probability
+for X being greater than 0.5 that we want to display (which will be perceived
+as the value we want):
+
+```{r}
+# vectorize this so we can use it later to construct vectors of distributions easily
+find_skew_normal_params = Vectorize(function(mu, sigma) {
+  mu_gt = mu - alpha * sigma
+  sigma_gt = beta * sigma
+  
+  desired_mode = mu
+  desired_sigma = sigma_gt
+  desired_x = 0.5
+  desired_p_gt_x = inv_lpr(pnorm(desired_x, mu, sigma, lower.tail = FALSE), alpha, beta)
+  
+  starting_xi = mu_gt
+  # start alpha not at 0 to avoid a local minimum
+  starting_alpha = if (desired_mode < mu_gt) 1 else -1
+  
+  cost = function(x) {
+    xi = x[[1]]
+    alpha = x[[2]]
+    # since both costs here are squares of differences of percentages, multiply 
+    # by 100^2 to get cost function on a reasonable scale
+    10000 * (
+      (sn_mode(xi, desired_sigma, alpha) - desired_mode)^2 +
+      (1 - psn_sigma(desired_x, xi, desired_sigma, alpha) - desired_p_gt_x)^2
+    )
+  }
+  
+  params = optim(c(xi = starting_xi, alpha = starting_alpha), cost)$par
+  c(params["xi"], sigma = desired_sigma, params["alpha"])
+})
+
+params = find_skew_normal_params(mu, sigma)
+params
+```
+
+Let's check:
+
+```{r}
+desired_x = 0.5
+desired_p_gt_x = inv_lpr(pnorm(0.5, mu, sigma, lower.tail = FALSE), alpha, beta)
+
+cat(sep = "",
+  "Desired mode: ", mu, "\n",
+  "Actual mode:  ", sn_mode(params["xi",], params["sigma",], params["alpha",]), "\n",
+  "Desired P(X > ", desired_x, "): ", desired_p_gt_x, "\n",
+  "Actual P(X > ", desired_x, "):  ", 1 - psn_sigma(desired_x, params["xi",], params["sigma",], params["alpha",]), "\n"
+)
+```
+
+We can put this together to create a function that generates vectors of
+skew-normal distributions matching the above constraints:
+
+```{r}
+dist_gt_skew_normal = function(mu, sigma) {
+  params = find_skew_normal_params(mu, sigma)
+  dist_wrap("sn_sigma", params["xi",], params["sigma",], params["alpha",])
+}
+
+X_gt_skew = dist_gt_skew_normal(mu, sigma)
+X_gt_skew
+```
+
+The transformation now looks like this:
+
+```{r fig.width = 6, fig.height = 6}
+transformation_plot(X_perceived, X_gt_skew)
+```
+
+We can see that at x = 0.5, the right-tailed probability matches. The other quantiles
+roughly match, though not as well as with $X^>$. However, the *modes* of the two
+distributions are equal here, unlike with $X^>$.
+
+### Comparing the three approaches
+
+Comparing the three approaches on one value of mu:
+
+```{r}
+data.frame(
+  dist = c(
+    "uncorrected",
+    "corrected normal",
+    "corrected skew-normal"
+  ),
+  X = c(
+    dist_normal(mu, sigma),
+    dist_gt_normal(mu, sigma),
+    dist_gt_skew_normal(mu, sigma)
+  )
+) |>
+  ggplot(aes(xdist = X, color = dist)) +
+  stat_slab(fill = NA) |> blend("darken") +
+  geom_vline(xintercept = mu, alpha = 0.5) +
+  scale_color_brewer(palette = "Set2")
+```
+
+We can see that the modes match for the skewed distribution, and it is not too far
+off the shape of the fully-corrected normal distributoin.
+
+Let's check over a set of distributions with different `mu`:
+
+```{r}
+dists = c(
+  "uncorrected" = dist_normal,
+  "corrected normal" = dist_gt_normal,
+  "corrected skew-normal" = dist_gt_skew_normal
+)
+
+dist_df = map_dfr(dists, .id = "correction", \(d) {
+  tibble(
+    mu = seq(0.47, 0.53, length.out = 7),
+    dist = d(mu, sigma)
+  )
+})
+
+dist_df
+```
+
+Let's check that the modes are indeed correct by looking at the difference
+between the modes of the distributions and the desired `mu`:
+
+```{r}
+dist_df |>
+  mutate(mode = round(ggdist::Mode(dist) - mu, 3)) |>
+  select(correction, mode, mu) |>
+  pivot_wider(names_from = correction, values_from = mode)
+```
+
+We can see the modes for the corrected normal distribution are all above the desired
+mode (as expected, due to a negative `alpha` parameter in the linear-in-probit function),
+while the corrected skew-normal distribution has a mode roughly equal to `mu`.
+
+
+```{r fig.width = 11, fig.height = 8}
+dist_df |>
+  ggplot(aes(xdist = dist, color = correction)) +
+  stat_slab(fill = NA) |> blend("darken") +
+  scale_color_brewer(palette = "Set2") +
+  facet_wrap(vars(mu)) +
+  geom_vline(aes(xintercept = mu), alpha = 0.5) 
+```
+
+The skew-normal corrected version is indeed very similar to the normal corrected version, but
+has its mode at the input value of `mu`.
+
