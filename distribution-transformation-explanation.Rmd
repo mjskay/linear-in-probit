@@ -68,11 +68,11 @@ inv_lpr = function(p, alpha, beta) inv_probit((probit(p) - alpha) / beta)
 
 This function looks like this:
 
-```{r fig.width = 7, fig.height = 7}
+```{r fig.width = 7, fig.height = 4}
 lpr_grid = expand.grid(
   p = seq(0, 1, length.out = 200),
-  alpha = c(-.4, 0, .4),
-  beta = exp(seq(-.4, .4, length.out = 8))
+  alpha = c(-1, -0.5, 0, 0.5, 1),
+  beta = exp(seq(-1, 1, length.out = 7))
 ) |>
   mutate(p_perc = lpr(p, alpha, beta))
 
@@ -81,7 +81,8 @@ plot_lpr_grid = lpr_grid |>
   geom_vline(xintercept = 0.5, color = "gray85") +
   geom_hline(yintercept = 0.5, color = "gray85") +
   geom_abline(intercept = 0, slope = 1, color = "gray85") +
-  labs(subtitle = "lpr in probability space", y = "subjective probability", x = "true probability")
+  labs(subtitle = "lpr in probability space", y = "subjective probability", x = "true probability") +
+  coord_cartesian(expand = FALSE)
 
 plot_lpr_grid_probit = lpr_grid |>
   filter(0 < p & p < 1) |>
@@ -89,11 +90,12 @@ plot_lpr_grid_probit = lpr_grid |>
   geom_vline(xintercept = 0, color = "gray85") +
   geom_hline(yintercept = 0, color = "gray85") +
   geom_abline(intercept = 0, slope = 1, color = "gray85") +
-  labs(subtitle = "lpr in probit space", y = "probit(subjective probability)", x = "probit(true probability)")
+  labs(subtitle = "lpr in probit space", y = "probit(subjective probability)", x = "probit(true probability)") +
+  coord_cartesian(ylim = c(-2.25, 2.25), xlim = c(-2.25, 2.25))
 
-(plot_lpr_grid + plot_lpr_grid_probit) &
+(plot_lpr_grid_probit / plot_lpr_grid) &
   geom_line(show.legend = FALSE) &
-  facet_grid(rows = vars(alpha), labeller = "label_both") &
+  facet_grid(cols = vars(alpha), labeller = "label_both") &
   cowplot::panel_border()
 ```
 
@@ -607,6 +609,11 @@ The transformation now looks like this:
 transformation_plot(X_perceived, X_gt_skew)
 ```
 
+```{r}
+ggsave("figures/correction-loop-skew.pdf", width = 6, height = 6)
+```
+
+
 We can see that at x = 0.5, the right-tailed probability matches. The other quantiles
 roughly match, though not as well as with $X^>$. However, the *modes* of the two
 distributions are equal here, unlike with $X^>$.
@@ -682,4 +689,3 @@ dist_df |>
 
 The skew-normal corrected version is indeed very similar to the normal corrected version, but
 has its mode at the input value of `mu`.
-
